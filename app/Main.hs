@@ -4,6 +4,7 @@ module Main (main) where
 
 import Control.Exception (assert)
 import Data.List (elemIndex)
+import qualified Data.Map as Map
 import Data.Text (pack, strip, unpack)
 import Data.Tuple.HT (mapFst)
 import GHC.Arr ((!))
@@ -13,8 +14,12 @@ import Text.Regex.PCRE (Regex)
 newtype NumericLiteralAST = MkNumericLiteral Double
   deriving (Show, Eq)
 
+literalValue :: NumericLiteralAST -> Double
+literalValue v = case v of
+  (MkNumericLiteral x) -> x
+
 newtype IdentifierAST = MkIdentifier String
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 data OperatorT = Plus | Minus | Mult | Div
   deriving (Show, Eq)
@@ -132,7 +137,37 @@ calculatorLex = go []
                     (Just (_before, matches, after)) -> go (result ++ [singleSymbolSym (fst (matches ! 1))]) after
                     Nothing -> case matchOnceText identifierRegex remaining of
                       (Just (_before, matches, after)) -> go (result ++ [IdentSym (fst (matches ! 1))]) after
-                      Nothing -> error "todo: other regexes"
+                      Nothing -> error ("todo: other regexes! Could not lex next token in: " ++ remaining)
+
+getOp :: OperatorT -> (Double -> Double -> Double)
+getOp Minus = (-)
+getOp Plus = (+)
+getOp Mult = (*)
+getOp Div = (/)
+
+eval :: ExpressionAST -> Map.Map IdentifierAST ExpressionAST -> Double
+eval expr table = case expr of
+  (LiteralExpression lit) -> literalValue lit
+  (IdentifierExpression ident) -> case Map.lookup ident table of
+    (Just res) -> eval res table
+    Nothing -> error ("No entry for " ++ show ident)
+  (OperationExpression op) -> getOp (operationOperand op) (eval (operationLhs op) table) (eval (operationRhs op) table)
+
+repl :: Map.Map IdentifierAST ExpressionAST -> IO ()
+repl table =
+  do
+    lineStr <- getLine
+    let newLine = parseLine (calculatorLex lineStr)
+     in do
+          case newLine of
+            (ExpressionLine exprLine, _) -> do
+              print exprLine
+              print (eval exprLine table)
+              repl table
+            (AssignmentLine assignLine, _) -> do
+              print assignLine
+              let new_table = Map.insert (assignmentIdent assignLine) (assignmentExpr assignLine) table
+               in repl new_table
 
 main :: IO ()
 main = do
@@ -153,11 +188,72 @@ main = do
   print (assert (calculatorLex "  +123.4 -10" == [NumLitSym 123.4, NumLitSym (-10)]) "Lexing positive float with clutter works!")
   print (assert (calculatorLex "  +123.4 - -10" == [NumLitSym 123.4, OperatorSym Minus, NumLitSym (-10)]) "Lexing operation works!")
   print (assert (calculatorLex "(+123.4 - -10)" == [LParenSym, NumLitSym 123.4, OperatorSym Minus, NumLitSym (-10), RParenSym]) "Lexing bracketed operation works!")
-  print (assert (parseLine (calculatorLex "(+123.4 - -10)") == (ExpressionLine (OperationExpression (MkOperation {operationLhs = LiteralExpression (MkNumericLiteral 123.4), operationOperand = Minus, operationRhs = LiteralExpression (MkNumericLiteral (-10.0))})), [])) "Parsing Operation works!")
-  print (assert (parseLine (calculatorLex "let pi = 3.1415926") == (AssignmentLine (MkAssignment {assignmentIdent = MkIdentifier "pi", assignmentExpr = LiteralExpression (MkNumericLiteral 3.1415926)}), [])) "Parsing assignment works!")
+  print
+    ( assert
+        ( parseLine (calculatorLex "(+123.4 - -10)")
+            == ( ExpressionLine
+                   ( OperationExpression
+                       ( MkOperation
+                           { operationLhs = LiteralExpression (MkNumericLiteral 123.4),
+                             operationOperand = Minus,
+                             operationRhs = LiteralExpression (MkNumericLiteral (-10.0))
+                           }
+                       )
+                   ),
+                 []
+               )
+        )
+        "Parsing Operation works!"
+    )
+
+  print
+    ( assert
+        ( parseLine (calculatorLex "let pi = 3.1415926")
+            == ( AssignmentLine
+                   ( MkAssignment
+                       { assignmentIdent = MkIdentifier "pi",
+                         assignmentExpr = LiteralExpression (MkNumericLiteral 3.1415926)
+                       }
+                   ),
+                 []
+               )
+        )
+        "Parsing assignment works!"
+    )
+
+  print
+    ( assert
+        ( parseLine (calculatorLex "let a = ( pi * ( r * r ) )")
+            == ( AssignmentLine
+                   ( MkAssignment
+                       { assignmentIdent = MkIdentifier "a",
+                         assignmentExpr =
+                           OperationExpression
+                             ( MkOperation
+                                 { operationLhs = IdentifierExpression (MkIdentifier "pi"),
+                                   operationOperand = Mult,
+                                   operationRhs =
+                                     OperationExpression
+                                       ( MkOperation
+                                           { operationLhs = IdentifierExpression (MkIdentifier "r"),
+                                             operationOperand = Mult,
+                                             operationRhs = IdentifierExpression (MkIdentifier "r")
+                                           }
+                                       )
+                                 }
+                             )
+                       }
+                   ),
+                 []
+               )
+        )
+        "Parsing assignment with nested expression works!"
+    )
 
   let numLitRegex :: Regex = makeRegex "^\\s*([+\\-])?\\d+(\\.(\\d+))?"
    in print (matchOnceText numLitRegex "  10 sdf8934&/2")
 
   print (parseLine (calculatorLex "(+123.4 - -10)"))
   print "Done"
+
+  repl Map.empty
